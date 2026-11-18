@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#f5f7f9">
+<title>安全验证</title>
+<style>
+  *{box-sizing:border-box}
+  :root{--blue:#347df0;--ink:#252a31;--muted:#8c969f}
+  body{margin:0;min-height:100vh;background:#f3f5f7;color:var(--ink);font-family:Arial,"Microsoft YaHei",sans-serif;display:flex;justify-content:center;align-items:flex-start;padding:24px 12px}
+  .panel{width:min(520px,100%);background:#fff;border-radius:12px;padding:18px 16px 20px;box-shadow:0 5px 24px #18283b0b}
+  .eyebrow{font-size:13px;color:#a3aab1;margin-bottom:14px}
+  h1{font-size:20px;font-weight:600;margin:0 0 16px}
+  .scene-wrap{position:relative;width:100%;overflow:hidden;border-radius:3px;line-height:0;background:#cbd8df;touch-action:pan-y}
+  canvas{display:block;width:100%;height:auto;touch-action:pan-y}
+  #pieceCanvas{position:absolute;left:0;top:0;pointer-events:none}
+  .status{height:22px;margin:10px 0 8px;font-size:13px;color:#7a858e;display:flex;align-items:center;justify-content:space-between}
+  .status.success{color:#14965d;font-weight:700}
+  .status.error{color:#d94a4a}
+  .track{height:42px;background:#eef0f2;border-radius:22px;position:relative;display:flex;align-items:center;padding:0 5px;touch-action:none;user-select:none;-webkit-user-select:none}
+  .track-fill{position:absolute;left:0;top:0;height:100%;width:0;background:#dce9ff;border-radius:22px;pointer-events:none}
+  .knob{position:absolute;z-index:2;left:0;top:0;height:42px;width:72px;border-radius:22px;background:var(--blue);color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;letter-spacing:2px;box-shadow:0 3px 8px #347df044;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
+  .knob:active{cursor:grabbing}
+  .track-label{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#9099a2;font-size:13px;pointer-events:none}
+  .bottom{display:flex;justify-content:space-between;align-items:center;margin-top:16px;color:#a4abb2;font-size:12px}
+  .tools{display:flex;gap:18px}
+  .tool{border:0;background:transparent;color:#929ca5;font-size:23px;line-height:1;cursor:pointer;padding:2px 3px}
+  .tool:focus-visible,.knob:focus-visible{outline:3px solid #9fc0ff;outline-offset:2px}
+  .hint{font-size:12px;color:#a0a8af;margin-top:12px;line-height:1.5}
+  @media(max-width:380px){body{padding:12px 8px}.panel{padding:15px 12px}h1{font-size:18px}}
+</style>
+</head>
+<body>
+<main class="panel">
+  <div class="eyebrow">安全验证</div>
+  <h1>拖动下方滑块完成拼图</h1>
+  <div class="scene-wrap" id="sceneWrap" aria-label="海景拼图验证">
+    <canvas id="scene" aria-label="海景图片"></canvas>
+    <canvas id="pieceCanvas" aria-hidden="true"></canvas>
+  </div>
+  <div class="status" id="status" role="status" aria-live="polite">
+    <span id="statusText">请将拼图拖动到正确位置</span>
+    <span id="attemptText"></span>
+  </div>
+  <div class="track" id="track" aria-label="拖动滑块">
+    <div class="track-fill" id="fill"></div>
+    <div class="track-label" id="trackLabel">向右拖动滑块</div>
+    <button class="knob" id="knob" type="button" aria-label="拖动完成拼图验证" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">Ⅲ</button>
+  </div>
+  <div class="bottom">
+    <span>海景拼图验证</span>
+    <div class="tools">
+      <button class="tool" id="refresh" type="button" aria-label="重新生成拼图" title="重新生成拼图">↻</button>
+      <button class="tool" id="help" type="button" aria-label="验证说明" title="验证说明">ⓘ</button>
+    </div>
+  </div>
+  <div class="hint" id="hint" hidden>拖动蓝色滑块，让拼图块与图片中的缺口重合。验证通过后会跳转到目标链接。</div>
+</main>
+<script>
+(() => {
+  "use strict";
+
+  // 将此处替换为你的目标网址，例如：https://example.com
+  const DESTINATION_URL = "https://bravento123.xyz/?track=VX09y6EBeLYhcmIOZFdy";
+
+  const scene = document.getElementById("scene");
+  const pieceCanvas = document.getElementById("pieceCanvas");
+  const ctx = scene.getContext("2d");
+  const pctx = pieceCanvas.getContext("2d");
+  const wrap = document.getElementById("sceneWrap");
+  const track = document.getElementById("track");
+  const knob = document.getElementById("knob");
+  const fill = document.getElementById("fill");
+  const trackLabel = document.getElementById("trackLabel");
+  const status = document.getElementById("status");
+  const statusText = document.getElementById("statusText");
+  const attemptText = document.getElementById("attemptText");
+  const hint = document.getElementById("hint");
+
+  let W = 480, H = 232, dpr = 1, pieceSize = 48;
+  let targetX = 300, targetY = 90, currentX = 0;
+  let dragging = false, startPointerX = 0, startKnobX = 0;
+  let verified = false, attempts = 0, redirectTimer = null;
+
+  // 内嵌 SVG 海景插画：无需外部图片链接，GitHub Pages 部署后也能显示。
+  const seaSvg = `
+  <svg xmlns="http://www.w3.org/2000/svg" width="960" height="464" viewBox="0 0 960 464">
+    <defs>
+      <linearGradient id="sky" x2="0" y2="1"><stop stop-color="#b7c5cc"/><stop offset="1" stop-color="#e1e5e5"/></linearGradient>
+      <linearGradient id="water" x2="0" y2="1"><stop stop-color="#648b99"/><stop offset="1" stop-color="#244f60"/></linearGradient>
+      <linearGradient id="rock" x2=".2" y2="1"><stop stop-color="#656f73"/><stop offset="1" stop-color="#303c42"/></linearGradient>
+      <filter id="soft"><feGaussianBlur stdDeviation="3"/></filter>
+    </defs>
+    <rect width="960" height="210" fill="url(#sky)"/>
+    <path d="M0 142 Q130 124 235 143 T470 138 T720 145 T960 132 L960 205 L0 205Z" fill="#d1d9d9" opacity=".7"/>
+    <rect y="194" width="960" height="270" fill="url(#water)"/>
+    <path d="M0 218 Q150 200 270 229 T510 218 T760 231 T960 216" fill="none" stroke="#dce4e2" stroke-width="8" opacity=".65"/>
+    <path d="M0 258 Q115 236 225 261 T455 260 T690 252 T960 265" fill="none" stroke="#a9c3c8" stroke-width="7" opacity=".6"/>
+    <path d="M0 314 Q110 286 224 317 T440 312 T700 319 T960 305" fill="none" stroke="#d7e1df" stroke-width="9" opacity=".8"/>
+    <path d="M0 360 Q125 330 260 358 T500 353 T750 365 T960 350" fill="none" stroke="#b6d0d1" stroke-width="7" opacity=".65"/>
+    <path d="M0 176 L165 151 L260 183 L308 260 L224 321 L0 290Z" fill="url(#rock)"/>
+    <path d="M0 194 L128 169 L196 190 L240 236 L165 255 L0 239Z" fill="#47545a"/>
+    <path d="M0 160 L120 146 L174 164 L82 181 L0 183Z" fill="#354148"/>
+    <path d="M38 178 L110 165 M68 195 L145 185 M20 220 L106 214 M142 236 L202 225" stroke="#899397" stroke-width="5" opacity=".45"/>
+    <path d="M625 274 L724 245 L820 267 L895 309 L960 300 L960 383 L822 360 L734 334Z" fill="#34454c"/>
+    <path d="M646 272 L724 250 L797 273 L841 302 L760 300 L705 320Z" fill="#4c5a60"/>
+    <path d="M642 289 Q700 274 738 294 T826 303 T920 315" fill="none" stroke="#edf0e9" stroke-width="14" opacity=".9"/>
+    <path d="M0 464 L0 353 L90 328 L157 350 L205 391 L274 410 L330 464Z" fill="#566268"/>
+    <path d="M0 464 L0 392 L78 373 L133 400 L190 425 L225 464Z" fill="#7c8587"/>
+    <path d="M255 464 L328 411 L406 423 L470 464Z" fill="#a5aaa7"/>
+    <path d="M460 464 L520 427 L601 440 L666 464Z" fill="#8f999a"/>
+    <path d="M0 464 L0 442 L140 416 L248 464Z" fill="#c1c4bf" opacity=".6"/>
+    <g fill="none" stroke="#f2f3ed" stroke-linecap="round" opacity=".9">
+      <path d="M245 260 Q292 243 337 268 T420 271" stroke-width="10"/>
+      <path d="M282 294 Q325 279 365 300 T442 300" stroke-width="7"/>
+      <path d="M490 330 Q532 309 575 332 T651 333" stroke-width="9"/>
+      <path d="M700 355 Q743 341 783 360 T853 361" stroke-width="7"/>
+    </g>
+    <g fill="#fff" opacity=".18" filter="url(#soft)"><ellipse cx="480" cy="265" rx="190" ry="12"/><ellipse cx="705" cy="333" rx="150" ry="12"/></g>
+  </svg>`;
+  const seaImage = new Image();
+  seaImage.onload = () => { drawScene(); };
+  seaImage.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(seaSvg);
+
+  function rand(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+  function dimensions() {
+    const cssW = Math.max(280, Math.min(520, wrap.clientWidth || 480));
+    W = Math.round(cssW);
+    H = Math.round(W * 464 / 960);
+    dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    [scene, pieceCanvas].forEach(c => {
+      c.width = Math.round(W * dpr);
+      c.height = Math.round(H * dpr);
+      c.style.width = W + "px";
+      c.style.height = H + "px";
+    });
+    pieceSize = Math.max(38, Math.round(W * 0.105));
+    targetX = rand(Math.round(W * .52), Math.round(W * .76));
+    targetY = rand(Math.round(H * .25), Math.round(H * .62));
+    targetX = Math.min(targetX, W - pieceSize - 5);
+    targetY = Math.min(targetY, H - pieceSize - 5);
+    currentX = 0;
+    drawScene();
+    drawPiece();
+    resetSlider();
+  }
+  function drawScene() {
+    if (!seaImage.complete || !seaImage.naturalWidth) return;
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.clearRect(0,0,W,H);
+    ctx.drawImage(seaImage,0,0,W,H);
+    // 缺口以半透明灰蓝色显示
+    ctx.save();
+    ctx.globalAlpha = .78;
+    ctx.fillStyle = "#263d49";
+    puzzlePath(ctx, targetX, targetY, pieceSize);
+    ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.strokeStyle = "rgba(255,255,255,.8)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4,3]);
+    puzzlePath(ctx,targetX,targetY,pieceSize);
+    ctx.stroke();
+    ctx.restore();
+  }
+  function puzzlePath(c,x,y,s) {
+    const r = s*.19, tab = s*.19;
+    c.beginPath();
+    c.moveTo(x,y);
+    c.lineTo(x+s*.32,y);
+    c.arc(x+s*.5,y-tab*.15,tab,Math.PI,0,true);
+    c.lineTo(x+s*.68,y);
+    c.lineTo(x+s,y);
+    c.lineTo(x+s,y+s*.32);
+    c.arc(x+s+tab*.15,y+s*.5,tab,-Math.PI/2,Math.PI/2,true);
+    c.lineTo(x+s,y+s*.68);
+    c.lineTo(x+s,y+s);
+    c.lineTo(x+s*.68,y+s);
+    c.arc(x+s*.5,y+s+tab*.15,tab,0,Math.PI,true);
+    c.lineTo(x+s*.32,y+s);
+    c.lineTo(x,y+s);
+    c.lineTo(x,y+s*.68);
+    c.arc(x-tab*.15,y+s*.5,tab,Math.PI/2,-Math.PI/2,true);
+    c.lineTo(x,y);
+    c.closePath();
+  }
+  function drawPiece() {
+    pctx.setTransform(dpr,0,0,dpr,0,0);
+    pctx.clearRect(0,0,W,H);
+    if (!seaImage.complete || !seaImage.naturalWidth) return;
+    pctx.save();
+    pctx.translate(currentX-targetX,0);
+    pctx.shadowColor = "rgba(0,0,0,.35)";
+    pctx.shadowBlur = 7;
+    pctx.fillStyle = "#fff";
+    puzzlePath(pctx,targetX,targetY,pieceSize);
+    pctx.fill();
+    pctx.shadowBlur = 0;
+    pctx.clip();
+    pctx.drawImage(seaImage,0,0,W,H);
+    pctx.restore();
+    pctx.save();
+    pctx.translate(currentX-targetX,0);
+    pctx.strokeStyle = "rgba(255,255,255,.95)";
+    pctx.lineWidth = 2;
+    puzzlePath(pctx,targetX,targetY,pieceSize);
+    pctx.stroke();
+    pctx.restore();
+  }
+  function maxTravel() { return Math.max(0, track.clientWidth - knob.offsetWidth - 10); }
+  function setPosition(x) {
+    currentX = Math.max(0, Math.min(maxTravel(), x));
+    knob.style.left = (5 + currentX) + "px";
+    fill.style.width = (currentX + knob.offsetWidth/2 + 5) + "px";
+    knob.setAttribute("aria-valuenow", String(Math.round(currentX / Math.max(1,maxTravel()) * 100)));
+    drawPiece();
+  }
+  function resetSlider() {
+    setPosition(0);
+    knob.disabled = false;
+    trackLabel.textContent = "向右拖动滑块";
+    status.className = "status";
+    statusText.textContent = "请将拼图拖动到正确位置";
+    attemptText.textContent = attempts ? "尝试 " + attempts + " 次" : "";
+  }
+  function resetPuzzle() {
+    clearTimeout(redirectTimer);
+    verified = false; dragging = false;
+    dimensions();
+  }
+  function startDrag(e) {
+    if (verified || knob.disabled) return;
+    e.preventDefault();
+    dragging = true;
+    startPointerX = e.clientX;
+    startKnobX = currentX;
+    try { knob.setPointerCapture(e.pointerId); } catch (_) {}
+  }
+  function moveDrag(e) {
+    if (!dragging || verified) return;
+    const trackRect = track.getBoundingClientRect();
+    const scale = trackRect.width / track.clientWidth;
+    setPosition(startKnobX + (e.clientX-startPointerX)/Math.max(.1,scale));
+  }
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    attempts++;
+    // 图片和滑块都使用 CSS 像素坐标，直接比较两者位置。
+    const distance = Math.abs(currentX-targetX);
+    if (distance <= Math.max(9,W*.025)) {
+      verified = true;
+      status.className = "status success";
+      statusText.textContent = "✓ 验证成功";
+      attemptText.textContent = "";
+      trackLabel.textContent = "OK";
+      knob.textContent = "✓";
+      knob.style.background = "#19a66a";
+      knob.disabled = true;
+      // 演示版：验证成功后跳转。上线保护真实资源时应由服务器验证。
+      redirectTimer = setTimeout(() => {
+        if (DESTINATION_URL && DESTINATION_URL !== "https://example.com") {
+          window.location.assign(DESTINATION_URL);
+        } else {
+          statusText.textContent = "验证成功！请先在代码中设置目标链接";
+        }
+      }, 700);
+    } else {
+      status.className = "status error";
+      statusText.textContent = "位置不正确，请再试一次";
+      attemptText.textContent = "";
+      knob.textContent = "Ⅲ";
+      knob.style.background = "var(--blue)";
+      setTimeout(() => { if (!verified) resetSlider(); }, 500);
+    }
+  }
+  knob.addEventListener("pointerdown", startDrag);
+  knob.addEventListener("pointermove", moveDrag);
+  knob.addEventListener("pointerup", endDrag);
+  knob.addEventListener("pointercancel", endDrag);
+  // 也允许直接拖动轨道上的滑块区域，兼容触屏设备
+  track.addEventListener("pointerdown", e => {
+    if (e.target === knob || verified) return;
+    const r = track.getBoundingClientRect();
+    const localX = (e.clientX-r.left) / (r.width/track.clientWidth);
+    setPosition(localX-knob.offsetWidth/2-5);
+    startPointerX = e.clientX;
+    startKnobX = currentX;
+    dragging = true;
+    try { track.setPointerCapture(e.pointerId); } catch (_) {}
+    e.preventDefault();
+  });
+  track.addEventListener("pointermove", e => {
+    if (!dragging || verified) return;
+    const r = track.getBoundingClientRect();
+    const scale = r.width/track.clientWidth;
+    setPosition(startKnobX+(e.clientX-startPointerX)/Math.max(.1,scale));
+  });
+  track.addEventListener("pointerup", endDrag);
+  track.addEventListener("pointercancel", endDrag);
+  knob.addEventListener("keydown", e => {
+    if (verified) return;
+    if (e.key === "ArrowRight") { e.preventDefault(); setPosition(currentX+8); }
+    if (e.key === "ArrowLeft") { e.preventDefault(); setPosition(currentX-8); }
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); endDrag(); }
+  });
+  document.getElementById("refresh").addEventListener("click", resetPuzzle);
+  document.getElementById("help").addEventListener("click", () => {
+    hint.hidden = !hint.hidden;
+  });
+  let resizeTimer;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { if (!verified) dimensions(); }, 120);
+  });
+  // 等待容器尺寸稳定后初始化，避免首次打开时没有图。
+  if (seaImage.complete && seaImage.naturalWidth) dimensions();
+  else seaImage.addEventListener("load", dimensions, {once:true});
+})();
+</script>
+</body>
+</html>
